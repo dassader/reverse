@@ -51,7 +51,14 @@ public class Server {
 
     public static void main(String[] args) throws Exception {
         int controlPort = Integer.parseInt(pick(args, 0, "CONTROL_PORT", "7443"));
-        Map<String, Route> routes = routes(args);
+        Map<String, Route> routes = new LinkedHashMap<>();
+
+        routes.put("mcp", new Route("mcp", "0.0.0.0", 7777, "127.0.0.1", 64343, "http", "-"));
+        // Examples:
+        // routes.put("raw", new Route("raw", "0.0.0.0", 2222, "10.0.0.10", 22, "tcp", "-"));
+        // routes.put("secure", new Route("secure", "0.0.0.0", 7778, "10.0.0.25", 443, "https-clean", "real-mcp.example.com"));
+
+        if (args.length > 1) routes = routes(args);
 
         ServerSocket clientPort = new ServerSocket(controlPort);
         IO.execute(() -> acceptClient(clientPort));
@@ -69,7 +76,7 @@ public class Server {
         }
         for (int i = 1; i < args.length; i++) {
             String[] p = args[i].split(",");
-            if (p.length < 5) throw new IllegalArgumentException("route: id,bind,publicPort,targetHost,targetPort[,tcp|http|https[,tlsHost]]");
+            if (p.length < 5) throw new IllegalArgumentException("route: id,bind,publicPort,targetHost,targetPort[,tcp|http|https|https-clean[,tlsHost]]");
             routes.put(p[0], new Route(
                 p[0], p[1], Integer.parseInt(p[2]), p[3], Integer.parseInt(p[4]),
                 p.length > 5 ? p[5] : "tcp",
@@ -171,7 +178,7 @@ public class Server {
             Socket tunnel = openTunnel(control, route);
             ACTIVE.add(tunnel);
             try (tunnel) {
-                if ("https".equalsIgnoreCase(route.mode)) https(route, codex, tunnel);
+                if ("https".equalsIgnoreCase(route.mode) || "https-clean".equalsIgnoreCase(route.mode)) https(route, codex, tunnel);
                 else if ("http".equalsIgnoreCase(route.mode)) http(route, codex, tunnel);
                 else tcp(codex, tunnel);
                 log("[S] " + route.id + "#" + id + " done");
@@ -208,14 +215,18 @@ public class Server {
         p.setEndpointIdentificationAlgorithm("HTTPS");
         ssl.setSSLParameters(p);
         ssl.startHandshake();
-        pipeHttpThen(codex, ssl, route.tlsHost);
+        pipeHttpThen(codex, ssl, route.tlsHost, "https-clean".equalsIgnoreCase(route.mode));
         pipeBoth(codex, ssl);
     }
 
     static void pipeHttpThen(Socket from, Socket to, String host) throws IOException {
+        pipeHttpThen(from, to, host, false);
+    }
+
+    static void pipeHttpThen(Socket from, Socket to, String host, boolean clean) throws IOException {
         byte[] head = readHttpHead(from.getInputStream());
         log("[S] " + requestLine(head));
-        byte[] rewritten = rewriteHost(head, host);
+        byte[] rewritten = clean ? cleanHeaders(head, host) : rewriteHost(head, host);
         to.getOutputStream().write(rewritten);
         to.getOutputStream().flush();
     }
@@ -248,6 +259,25 @@ public class Server {
         }
         if (!seen && lines.length > 1) lines[0] = lines[0] + "\r\nHost: " + host;
         return String.join("\r\n", lines).getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    static byte[] cleanHeaders(byte[] raw, String host) {
+        String s = new String(raw, StandardCharsets.ISO_8859_1);
+        String[] lines = s.split("\r\n", -1);
+        if (lines.length == 0) return raw;
+        String contentLength = null;
+        String contentType = null;
+        for (String line : lines) {
+            if (line.regionMatches(true, 0, "Content-Length:", 0, 15)) contentLength = line;
+            if (line.regionMatches(true, 0, "Content-Type:", 0, 13)) contentType = line;
+        }
+        StringBuilder out = new StringBuilder();
+        out.append(lines[0]).append("\r\n");
+        out.append("Host: ").append(host).append("\r\n");
+        if (contentLength != null) out.append(contentLength).append("\r\n");
+        if (contentType != null) out.append(contentType).append("\r\n");
+        out.append("\r\n");
+        return out.toString().getBytes(StandardCharsets.ISO_8859_1);
     }
 
     static void pipeBoth(Socket a, Socket b) throws InterruptedException {
