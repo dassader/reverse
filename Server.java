@@ -54,12 +54,12 @@ public class Server {
     static Map<String, Route> routes(String[] args) {
         LinkedHashMap<String, Route> routes = new LinkedHashMap<>();
         if (args.length <= 1) {
-            routes.put("mcp", new Route("mcp", "0.0.0.0", 7777, "127.0.0.1", 64343, 8, "tcp", "-"));
+            routes.put("mcp", new Route("mcp", "0.0.0.0", 7777, "127.0.0.1", 64343, 8, "http", "-"));
             return routes;
         }
         for (int i = 1; i < args.length; i++) {
             String[] p = args[i].split(",");
-            if (p.length < 6) throw new IllegalArgumentException("route: id,bind,publicPort,targetHost,targetPort,channels[,tcp|https[,tlsHost]]");
+            if (p.length < 6) throw new IllegalArgumentException("route: id,bind,publicPort,targetHost,targetPort,channels[,tcp|http|https[,tlsHost]]");
             String id = p[0];
             routes.put(id, new Route(
                 id, p[1], Integer.parseInt(p[2]), p[3], Integer.parseInt(p[4]), Integer.parseInt(p[5]),
@@ -134,6 +134,7 @@ public class Server {
             log("[S] " + route.id + "#" + stream + " -> tunnel#" + tunnel.id);
             try (tunnel.socket) {
                 if ("https".equalsIgnoreCase(route.mode)) https(route, codex, tunnel.socket);
+                else if ("http".equalsIgnoreCase(route.mode)) http(route, codex, tunnel.socket);
                 else tcp(route, codex, tunnel.socket);
                 log("[S] " + route.id + "#" + stream + " done");
             }
@@ -160,6 +161,10 @@ public class Server {
     }
 
     static void tcp(Route route, Socket codex, Socket tunnel) throws Exception {
+        pipeBoth(codex, tunnel);
+    }
+
+    static void http(Route route, Socket codex, Socket tunnel) throws Exception {
         pipeHttpThen(codex, tunnel, route.targetHost + ":" + route.targetPort);
         pipeBoth(codex, tunnel);
     }
