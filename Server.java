@@ -42,9 +42,10 @@ public class Server {
     public static void main(String[] args) throws Exception {
         int controlPort = Integer.parseInt(pick(args, 0, "CONTROL_PORT", "7443"));
         Map<String, Route> routes = routes(args);
+        String version = version(routes.values());
 
         ServerSocket control = new ServerSocket(controlPort);
-        IO.execute(() -> acceptControl(control, routes));
+        IO.execute(() -> acceptControl(control, routes, version));
         for (Route route : routes.values()) IO.execute(() -> acceptCodex(route));
 
         printConfig(controlPort, routes.values());
@@ -70,25 +71,32 @@ public class Server {
         return routes;
     }
 
-    static void acceptControl(ServerSocket server, Map<String, Route> routes) {
+    static void acceptControl(ServerSocket server, Map<String, Route> routes, String version) {
         while (true) try {
             Socket s = server.accept();
             s.setTcpNoDelay(true);
-            IO.execute(() -> control(s, routes));
+            IO.execute(() -> control(s, routes, version));
         } catch (IOException e) {
             log("[S] control accept error");
         }
     }
 
-    static void control(Socket s, Map<String, Route> routes) {
+    static void control(Socket s, Map<String, Route> routes, String version) {
         try {
             BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
             String line = in.readLine();
             if ("CONFIG".equals(line)) {
                 PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true);
+                out.println("VERSION " + version);
                 for (Route r : routes.values()) out.println("ROUTE " + r.id + " " + r.targetHost + " " + r.targetPort + " " + r.channels);
                 out.println("END");
                 log("[S] config -> " + addr(s));
+                close(s);
+                return;
+            }
+            if (line != null && line.startsWith("PING ")) {
+                PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true);
+                out.println(version.equals(line.substring(5).trim()) ? "OK" : "RELOAD");
                 close(s);
                 return;
             }
@@ -251,6 +259,12 @@ public class Server {
             System.out.println("Route " + r.id + ": " + r.bind + ":" + r.publicPort + " -> " + r.mode + " " + r.targetHost + ":" + r.targetPort + " x" + r.channels);
             for (String ip : localIps()) System.out.println("Codex:  http://" + ip + ":" + r.publicPort + "/stream");
         }
+    }
+
+    static String version(Collection<Route> routes) {
+        StringBuilder s = new StringBuilder();
+        for (Route r : routes) s.append(r.id).append(',').append(r.targetHost).append(',').append(r.targetPort).append(',').append(r.channels).append(';');
+        return Integer.toHexString(s.toString().hashCode());
     }
 
     static List<String> localIps() throws SocketException {
