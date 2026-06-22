@@ -29,34 +29,34 @@ public class StatsService {
     private volatile long clientConnectedAt;
     private volatile long lastPongAt;
 
-    public long start(RouteConfig route, Socket codex) {
+    public long start(RouteConfig route, String consumer) {
         long id = streams.incrementAndGet();
         activeStreams.incrementAndGet();
-        route(route.getId()).request(addr(codex));
+        route(route.getId()).request(consumer);
         return id;
     }
 
-    public void finish(RouteConfig route) {
+    public void finish(RouteConfig route, String consumer) {
         finishedStreams.incrementAndGet();
         activeStreams.updateAndGet(value -> Math.max(0, value - 1));
-        route(route.getId()).done();
+        route(route.getId()).done(consumer);
     }
 
-    public void error(RouteConfig route) {
+    public void error(RouteConfig route, String consumer) {
         errors.incrementAndGet();
-        route(route.getId()).error();
+        route(route.getId()).error(consumer);
     }
 
-    public void up(RouteConfig route, long n) {
+    public void up(RouteConfig route, String consumer, long n) {
         if (n <= 0) return;
         bytesUp.addAndGet(n);
-        route(route.getId()).up(n);
+        route(route.getId()).up(consumer, n);
     }
 
-    public void down(RouteConfig route, long n) {
+    public void down(RouteConfig route, String consumer, long n) {
         if (n <= 0) return;
         bytesDown.addAndGet(n);
-        route(route.getId()).down(n);
+        route(route.getId()).down(consumer, n);
     }
 
     public RouteStats route(String id) {

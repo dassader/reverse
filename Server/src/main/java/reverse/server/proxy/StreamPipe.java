@@ -17,10 +17,10 @@ public final class StreamPipe {
     private StreamPipe() {
     }
 
-    public static void both(RouteConfig route, StatsService stats, Socket a, Socket b) throws InterruptedException {
+    public static void both(RouteConfig route, StatsService stats, String consumer, Socket a, Socket b) throws InterruptedException {
         CountDownLatch done = new CountDownLatch(1);
-        Thread left = new Thread(() -> pipe(a, b, done, n -> stats.up(route, n)), "pipe-up");
-        Thread right = new Thread(() -> pipe(b, a, done, n -> stats.down(route, n)), "pipe-down");
+        Thread left = new Thread(() -> pipe(a, b, done, n -> stats.up(route, consumer, n)), "pipe-up");
+        Thread right = new Thread(() -> pipe(b, a, done, n -> stats.down(route, consumer, n)), "pipe-down");
         left.setDaemon(true);
         right.setDaemon(true);
         left.start();

@@ -13,13 +13,13 @@ public final class HttpTools {
     private HttpTools() {
     }
 
-    public static String forwardFirstRequest(RouteConfig route, StatsService stats, Socket from, Socket to, String host, boolean clean) throws IOException {
+    public static String forwardFirstRequest(RouteConfig route, StatsService stats, String consumer, Socket from, Socket to, String host, boolean clean) throws IOException {
         byte[] head = readHead(from.getInputStream());
         String request = requestLine(head);
         byte[] rewritten = clean ? cleanHeaders(head, host) : rewriteHost(head, host);
         to.getOutputStream().write(rewritten);
         to.getOutputStream().flush();
-        stats.up(route, rewritten.length);
+        stats.up(route, consumer, rewritten.length);
         return request;
     }
 

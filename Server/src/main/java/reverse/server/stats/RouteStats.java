@@ -1,5 +1,9 @@
 package reverse.server.stats;
 
+import java.util.Comparator;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class RouteStats {
@@ -8,6 +12,7 @@ public class RouteStats {
     private final AtomicLong errors = new AtomicLong();
     private final AtomicLong bytesUp = new AtomicLong();
     private final AtomicLong bytesDown = new AtomicLong();
+    private final ConcurrentMap<String, ConsumerStats> consumers = new ConcurrentHashMap<>();
     private volatile long lastRequestAt;
     private volatile long lastErrorAt;
     private volatile String lastRequest = "-";
@@ -18,23 +23,38 @@ public class RouteStats {
         active.incrementAndGet();
         lastRequestAt = System.currentTimeMillis();
         lastRequest = remote;
+        consumer(remote).request();
     }
 
-    public void done() {
+    public void done(String remote) {
         active.updateAndGet(value -> Math.max(0, value - 1));
+        consumer(remote).done();
     }
 
-    public void error() {
+    public void error(String remote) {
         errors.incrementAndGet();
         lastErrorAt = System.currentTimeMillis();
+        consumer(remote).error();
     }
 
-    public void up(long n) {
+    public void up(String remote, long n) {
         if (n > 0) bytesUp.addAndGet(n);
+        consumer(remote).up(n);
     }
 
-    public void down(long n) {
+    public void down(String remote, long n) {
         if (n > 0) bytesDown.addAndGet(n);
+        consumer(remote).down(n);
+    }
+
+    public ConsumerStats consumer(String remote) {
+        return consumers.computeIfAbsent(remote == null || remote.isBlank() ? "unknown" : remote, ConsumerStats::new);
+    }
+
+    public List<ConsumerStats> consumers() {
+        return consumers.values().stream()
+            .sorted(Comparator.comparingLong(ConsumerStats::lastSeenAt).reversed())
+            .toList();
     }
 
     public long requests() {

@@ -31,7 +31,16 @@ Open the web UI:
 http://server-ip:8080/
 ```
 
-The UI has a server IP dropdown and a `Copy Client.java` button. Pick the LAN IP that the client computer can reach, then copy the ready client source file with that IP and control port already embedded:
+The UI is a live board:
+
+- `Consumers` appear when Codex or another tool connects to a tunnel.
+- `Tunnels` appear as cards after you add them.
+- `Client / Targets` shows the reverse client and all configured targets.
+- `Live Map` draws the current `Consumer -> Server -> Tunnel -> Client -> Target` path with traffic counters.
+
+Use the bottom-right `+` button to add a tunnel. Use the bottom-right `</>` button to open the client-code modal.
+
+The client-code modal has a server IP dropdown and a `Copy Client.java` button. Pick the LAN IP that the client computer can reach, then copy the ready client source file with that IP and control port already embedded:
 
 ```bash
 javac Client.java

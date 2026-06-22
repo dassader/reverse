@@ -24,26 +24,27 @@ public class ProxySession implements Runnable {
 
     @Override
     public void run() {
-        long id = stats.start(route, codex);
+        String consumer = addr(codex);
+        long id = stats.start(route, consumer);
         boolean ok = false;
-        System.out.println("[S] " + route.getId() + "#" + id + " + " + addr(codex));
+        System.out.println("[S] " + route.getId() + "#" + id + " + " + consumer);
         try {
             Socket tunnel = client.openTunnel(route);
             try {
-                if (route.getMode() == ProxyMode.TCP) ProxyBridge.tcp(route, stats, codex, tunnel);
-                else if (route.getMode() == ProxyMode.HTTP) ProxyBridge.http(route, stats, id, codex, tunnel);
-                else ProxyBridge.https(route, stats, id, codex, tunnel);
+                if (route.getMode() == ProxyMode.TCP) ProxyBridge.tcp(route, stats, consumer, codex, tunnel);
+                else if (route.getMode() == ProxyMode.HTTP) ProxyBridge.http(route, stats, consumer, id, codex, tunnel);
+                else ProxyBridge.https(route, stats, consumer, id, codex, tunnel);
                 ok = true;
             } finally {
                 client.release(tunnel);
                 close(tunnel);
             }
         } catch (Exception e) {
-            stats.error(route);
+            stats.error(route, consumer);
             System.out.println("[S] " + route.getId() + "#" + id + " error: " + shortError(e));
         } finally {
             close(codex);
-            stats.finish(route);
+            stats.finish(route, consumer);
             if (ok) System.out.println("[S] " + route.getId() + "#" + id + " done");
         }
     }
