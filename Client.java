@@ -7,114 +7,67 @@ import java.util.concurrent.*;
 public class Client {
     static final int BUF = 64 * 1024;
     static final ExecutorService IO = Executors.newCachedThreadPool();
-    static volatile boolean reload;
-    static final List<Socket> OPEN = Collections.synchronizedList(new ArrayList<>());
+    static final List<Socket> ACTIVE = Collections.synchronizedList(new ArrayList<>());
 
-    static class Route {
-        final String id, host;
-        final int port, channels;
-
-        Route(String id, String host, int port, int channels) {
-            this.id = id;
-            this.host = host;
-            this.port = port;
-            this.channels = channels;
-        }
-    }
-
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
         String serverHost = pick(args, 0, "SERVER_HOST", "127.0.0.1");
-        int controlPort = Integer.parseInt(pick(args, 1, "CONTROL_PORT", "7443"));
+        int serverPort = Integer.parseInt(pick(args, 1, "SERVER_PORT", "7443"));
 
-        System.out.println("Connecting...");
         while (true) {
-            Config cfg = null;
-            while (cfg == null) {
-                try {
-                    cfg = config(serverHost, controlPort);
-                } catch (IOException e) {
-                    sleep(1000);
-                }
-            }
-            reload = false;
-            for (Route r : cfg.routes) {
-                for (int i = 1; i <= r.channels; i++) {
-                    int n = i;
-                    Thread t = new Thread(() -> loop(serverHost, controlPort, r, n), "tunnel-" + r.id + "-" + n);
-                    t.setDaemon(true);
-                    t.start();
-                }
-            }
-            System.out.println("Connected!");
-            while (!reload) {
-                sleep(5000);
-                if (!ping(serverHost, controlPort, cfg.version)) reload = true;
+            System.out.println("Connecting...");
+            try (Socket control = new Socket(serverHost, serverPort)) {
+                control.setTcpNoDelay(true);
+                System.out.println("Connected!");
+                commands(serverHost, serverPort, control);
+            } catch (Exception ignored) {
             }
             closeAll();
-            System.out.println("Connecting...");
+            sleep(1000);
         }
     }
 
-    static class Config {
-        final String version;
-        final List<Route> routes;
-
-        Config(String version, List<Route> routes) {
-            this.version = version;
-            this.routes = routes;
-        }
-    }
-
-    static Config config(String serverHost, int controlPort) throws IOException {
-        try (Socket s = new Socket(serverHost, controlPort)) {
-            s.setTcpNoDelay(true);
-            PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true);
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
-            out.println("CONFIG");
-            ArrayList<Route> routes = new ArrayList<>();
-            String version = "";
-            for (String line; (line = in.readLine()) != null; ) {
-                if ("END".equals(line)) break;
-                if (line.startsWith("VERSION ")) version = line.substring(8).trim();
-                String[] p = line.split(" ");
-                if (p.length == 5 && "ROUTE".equals(p[0])) routes.add(new Route(p[1], p[2], Integer.parseInt(p[3]), Integer.parseInt(p[4])));
+    static void commands(String serverHost, int serverPort, Socket control) throws IOException {
+        BufferedReader in = new BufferedReader(new InputStreamReader(control.getInputStream(), StandardCharsets.UTF_8));
+        BufferedWriter out = new BufferedWriter(new OutputStreamWriter(control.getOutputStream(), StandardCharsets.UTF_8));
+        for (String line; (line = in.readLine()) != null; ) {
+            if ("P".equals(line)) {
+                out.write("P\n");
+                out.flush();
+            } else if ("S".equals(line)) {
+                socket(serverHost, serverPort);
             }
-            if (routes.isEmpty()) throw new IOException("empty config");
-            return new Config(version, routes);
         }
     }
 
-    static boolean ping(String serverHost, int controlPort, String version) {
-        try (Socket s = new Socket(serverHost, controlPort)) {
-            s.setTcpNoDelay(true);
-            PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true);
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
-            out.println("PING " + version);
-            return "OK".equals(in.readLine());
-        } catch (IOException e) {
-            return false;
-        }
-    }
+    static void socket(String serverHost, int serverPort) {
+        Socket tunnel = null;
+        Socket target = null;
+        try {
+            tunnel = new Socket(serverHost, serverPort);
+            tunnel.setTcpNoDelay(true);
+            ACTIVE.add(tunnel);
 
-    static void loop(String serverHost, int controlPort, Route route, int n) {
-        while (true) {
-            if (reload) return;
-            try (Socket tunnel = new Socket(serverHost, controlPort)) {
-                OPEN.add(tunnel);
-                tunnel.setTcpNoDelay(true);
-                PrintWriter out = new PrintWriter(new OutputStreamWriter(tunnel.getOutputStream(), StandardCharsets.UTF_8), true);
-                out.println("TUNNEL " + route.id);
-                if (tunnel.getInputStream().read() != 1) throw new IOException("server closed tunnel");
-                try (Socket target = new Socket(route.host, route.port)) {
-                    OPEN.add(target);
-                    target.setTcpNoDelay(true);
-                    pipeBoth(tunnel, target);
+            String line = readLine(tunnel.getInputStream());
+            if (line == null || !line.startsWith("S ")) throw new IOException("bad socket command");
+            String[] p = line.split(" ", 3);
+            if (p.length != 3) throw new IOException("bad socket command");
+
+            target = new Socket(p[1], Integer.parseInt(p[2]));
+            target.setTcpNoDelay(true);
+            ACTIVE.add(target);
+            Socket a = tunnel, b = target;
+            IO.execute(() -> {
+                try {
+                    pipeBoth(a, b);
+                } catch (InterruptedException ignored) {
+                } finally {
+                    ACTIVE.remove(a);
+                    ACTIVE.remove(b);
                 }
-            } catch (Exception e) {
-                sleep(1000);
-            } finally {
-                OPEN.removeIf(Socket::isClosed);
-            }
+            });
+        } catch (Exception ignored) {
+            close(tunnel);
+            close(target);
         }
     }
 
@@ -144,6 +97,18 @@ public class Client {
         }
     }
 
+    static String readLine(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int b;
+        while ((b = in.read()) >= 0) {
+            if (b == '\n') break;
+            if (b != '\r') out.write(b);
+            if (out.size() > 1024) throw new IOException("line too long");
+        }
+        if (b < 0 && out.size() == 0) return null;
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
     static String pick(String[] args, int i, String env, String def) {
         return args.length > i ? args[i] : System.getenv().getOrDefault(env, def);
     }
@@ -156,9 +121,9 @@ public class Client {
     }
 
     static void closeAll() {
-        synchronized (OPEN) {
-            for (Socket s : OPEN) close(s);
-            OPEN.clear();
+        synchronized (ACTIVE) {
+            for (Socket s : ACTIVE) close(s);
+            ACTIVE.clear();
         }
     }
 

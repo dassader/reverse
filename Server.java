@@ -9,43 +9,52 @@ import java.util.concurrent.atomic.AtomicLong;
 public class Server {
     static final int BUF = 64 * 1024;
     static final ExecutorService IO = Executors.newCachedThreadPool();
-    static final AtomicLong TUNNELS = new AtomicLong();
     static final AtomicLong STREAMS = new AtomicLong();
+    static final BlockingQueue<Socket> DATA = new LinkedBlockingQueue<>();
+    static final List<Socket> ACTIVE = Collections.synchronizedList(new ArrayList<>());
+    static final Object OPEN_LOCK = new Object();
+    static volatile Control CONTROL;
 
     static class Route {
         final String id, bind, targetHost, mode, tlsHost;
-        final int publicPort, targetPort, channels;
-        final BlockingQueue<Tunnel> tunnels = new LinkedBlockingQueue<>();
+        final int publicPort, targetPort;
 
-        Route(String id, String bind, int publicPort, String targetHost, int targetPort, int channels, String mode, String tlsHost) {
+        Route(String id, String bind, int publicPort, String targetHost, int targetPort, String mode, String tlsHost) {
             this.id = id;
             this.bind = bind;
             this.publicPort = publicPort;
             this.targetHost = targetHost;
             this.targetPort = targetPort;
-            this.channels = channels;
             this.mode = mode;
             this.tlsHost = tlsHost == null || tlsHost.equals("-") ? targetHost : tlsHost;
         }
     }
 
-    static class Tunnel {
-        final long id;
+    static class Control {
         final Socket socket;
+        final BufferedReader in;
+        final BufferedWriter out;
+        volatile long lastPong = System.currentTimeMillis();
 
-        Tunnel(long id, Socket socket) {
-            this.id = id;
+        Control(Socket socket) throws IOException {
             this.socket = socket;
+            this.in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            this.out = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
+        }
+
+        synchronized void send(String line) throws IOException {
+            out.write(line);
+            out.write('\n');
+            out.flush();
         }
     }
 
     public static void main(String[] args) throws Exception {
         int controlPort = Integer.parseInt(pick(args, 0, "CONTROL_PORT", "7443"));
         Map<String, Route> routes = routes(args);
-        String version = version(routes.values());
 
-        ServerSocket control = new ServerSocket(controlPort);
-        IO.execute(() -> acceptControl(control, routes, version));
+        ServerSocket clientPort = new ServerSocket(controlPort);
+        IO.execute(() -> acceptClient(clientPort));
         for (Route route : routes.values()) IO.execute(() -> acceptCodex(route));
 
         printConfig(controlPort, routes.values());
@@ -55,66 +64,85 @@ public class Server {
     static Map<String, Route> routes(String[] args) {
         LinkedHashMap<String, Route> routes = new LinkedHashMap<>();
         if (args.length <= 1) {
-            routes.put("mcp", new Route("mcp", "0.0.0.0", 7777, "127.0.0.1", 64343, 8, "http", "-"));
+            routes.put("mcp", new Route("mcp", "0.0.0.0", 7777, "127.0.0.1", 64343, "http", "-"));
             return routes;
         }
         for (int i = 1; i < args.length; i++) {
             String[] p = args[i].split(",");
-            if (p.length < 6) throw new IllegalArgumentException("route: id,bind,publicPort,targetHost,targetPort,channels[,tcp|http|https[,tlsHost]]");
-            String id = p[0];
-            routes.put(id, new Route(
-                id, p[1], Integer.parseInt(p[2]), p[3], Integer.parseInt(p[4]), Integer.parseInt(p[5]),
-                p.length > 6 ? p[6] : "tcp",
-                p.length > 7 ? p[7] : "-"
+            if (p.length < 5) throw new IllegalArgumentException("route: id,bind,publicPort,targetHost,targetPort[,tcp|http|https[,tlsHost]]");
+            routes.put(p[0], new Route(
+                p[0], p[1], Integer.parseInt(p[2]), p[3], Integer.parseInt(p[4]),
+                p.length > 5 ? p[5] : "tcp",
+                p.length > 6 ? p[6] : "-"
             ));
         }
         return routes;
     }
 
-    static void acceptControl(ServerSocket server, Map<String, Route> routes, String version) {
+    static void acceptClient(ServerSocket server) {
         while (true) try {
             Socket s = server.accept();
             s.setTcpNoDelay(true);
-            IO.execute(() -> control(s, routes, version));
+            IO.execute(() -> clientSocket(s));
         } catch (IOException e) {
-            log("[S] control accept error");
+            log("[S] client accept error");
         }
     }
 
-    static void control(Socket s, Map<String, Route> routes, String version) {
+    static void clientSocket(Socket s) {
         try {
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
-            String line = in.readLine();
-            if ("CONFIG".equals(line)) {
-                PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true);
-                out.println("VERSION " + version);
-                for (Route r : routes.values()) out.println("ROUTE " + r.id + " " + r.targetHost + " " + r.targetPort + " " + r.channels);
-                out.println("END");
-                log("[S] config -> " + addr(s));
-                close(s);
+            Control control = CONTROL;
+            if (control == null) {
+                setControl(s);
                 return;
             }
-            if (line != null && line.startsWith("PING ")) {
-                PrintWriter out = new PrintWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8), true);
-                out.println(version.equals(line.substring(5).trim()) ? "OK" : "RELOAD");
-                close(s);
-                return;
-            }
-            if (line != null && line.startsWith("TUNNEL ")) {
-                Route route = routes.get(line.substring(7).trim());
-                if (route == null) {
-                    close(s);
-                    return;
-                }
-                long id = TUNNELS.incrementAndGet();
-                route.tunnels.offer(new Tunnel(id, s));
-                log("[S] tunnel " + route.id + "#" + id + " + " + addr(s));
-                return;
-            }
-            close(s);
-        } catch (IOException e) {
+            DATA.offer(s);
+        } catch (Exception e) {
             close(s);
         }
+    }
+
+    static void setControl(Socket s) throws IOException {
+        Control old = CONTROL;
+        if (old != null) close(old.socket);
+        Control control = new Control(s);
+        CONTROL = control;
+        log("[S] client connected " + addr(s));
+        IO.execute(() -> readControl(control));
+        IO.execute(() -> ping(control));
+    }
+
+    static void readControl(Control control) {
+        try {
+            for (String line; (line = control.in.readLine()) != null; ) {
+                if ("P".equals(line)) control.lastPong = System.currentTimeMillis();
+            }
+        } catch (IOException ignored) {
+        } finally {
+            lost(control);
+        }
+    }
+
+    static void ping(Control control) {
+        while (CONTROL == control) {
+            sleep(5000);
+            try {
+                control.send("P");
+                if (System.currentTimeMillis() - control.lastPong > 15000) lost(control);
+            } catch (IOException e) {
+                lost(control);
+            }
+        }
+    }
+
+    static void lost(Control control) {
+        if (CONTROL != control) return;
+        CONTROL = null;
+        close(control.socket);
+        closeAll();
+        Socket s;
+        while ((s = DATA.poll()) != null) close(s);
+        log("[S] client disconnected");
     }
 
     static void acceptCodex(Route route) {
@@ -131,44 +159,41 @@ public class Server {
     }
 
     static void serve(Route route, Socket codex) {
-        long stream = STREAMS.incrementAndGet();
-        log("[S] codex " + route.id + "#" + stream + " + " + addr(codex));
+        long id = STREAMS.incrementAndGet();
+        log("[S] codex " + route.id + "#" + id + " + " + addr(codex));
         try (codex) {
-            Tunnel tunnel = take(route);
-            if (tunnel == null) {
-                log("[S] " + route.id + "#" + stream + " no tunnel");
+            Control control = CONTROL;
+            if (control == null) {
+                log("[S] " + route.id + "#" + id + " no client");
                 return;
             }
-            log("[S] " + route.id + "#" + stream + " -> tunnel#" + tunnel.id);
-            try (tunnel.socket) {
-                if ("https".equalsIgnoreCase(route.mode)) https(route, codex, tunnel.socket);
-                else if ("http".equalsIgnoreCase(route.mode)) http(route, codex, tunnel.socket);
-                else tcp(route, codex, tunnel.socket);
-                log("[S] " + route.id + "#" + stream + " done");
+
+            Socket tunnel = openTunnel(control, route);
+            ACTIVE.add(tunnel);
+            try (tunnel) {
+                if ("https".equalsIgnoreCase(route.mode)) https(route, codex, tunnel);
+                else if ("http".equalsIgnoreCase(route.mode)) http(route, codex, tunnel);
+                else tcp(codex, tunnel);
+                log("[S] " + route.id + "#" + id + " done");
+            } finally {
+                ACTIVE.remove(tunnel);
             }
         } catch (Exception e) {
-            log("[S] " + route.id + "#" + stream + " error");
+            log("[S] " + route.id + "#" + id + " error");
         }
     }
 
-    static Tunnel take(Route route) throws InterruptedException {
-        long end = System.currentTimeMillis() + 30_000;
-        while (System.currentTimeMillis() < end) {
-            Tunnel tunnel = route.tunnels.poll(end - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
-            if (tunnel == null) return null;
-            try {
-                tunnel.socket.getOutputStream().write(1);
-                tunnel.socket.getOutputStream().flush();
-                return tunnel;
-            } catch (IOException e) {
-                log("[S] tunnel " + route.id + "#" + tunnel.id + " stale");
-                close(tunnel.socket);
-            }
+    static Socket openTunnel(Control control, Route route) throws Exception {
+        synchronized (OPEN_LOCK) {
+            control.send("S");
+            Socket tunnel = DATA.poll(30, TimeUnit.SECONDS);
+            if (tunnel == null) throw new IOException("no data socket");
+            sendLine(tunnel, "S " + route.targetHost + " " + route.targetPort);
+            return tunnel;
         }
-        return null;
     }
 
-    static void tcp(Route route, Socket codex, Socket tunnel) throws Exception {
+    static void tcp(Socket codex, Socket tunnel) throws Exception {
         pipeBoth(codex, tunnel);
     }
 
@@ -252,19 +277,13 @@ public class Server {
         }
     }
 
-    static void printConfig(int controlPort, Collection<Route> routes) throws SocketException {
-        System.out.println("Server control: 0.0.0.0:" + controlPort);
-        for (String ip : localIps()) System.out.println("Client: java -cp Client Client " + ip + " " + controlPort);
+    static void printConfig(int clientPort, Collection<Route> routes) throws SocketException {
+        System.out.println("Client port: 0.0.0.0:" + clientPort);
+        for (String ip : localIps()) System.out.println("Client: java -cp Client Client " + ip + " " + clientPort);
         for (Route r : routes) {
-            System.out.println("Route " + r.id + ": " + r.bind + ":" + r.publicPort + " -> " + r.mode + " " + r.targetHost + ":" + r.targetPort + " x" + r.channels);
+            System.out.println("Route " + r.id + ": " + r.bind + ":" + r.publicPort + " -> " + r.mode + " " + r.targetHost + ":" + r.targetPort);
             for (String ip : localIps()) System.out.println("Codex:  http://" + ip + ":" + r.publicPort + "/stream");
         }
-    }
-
-    static String version(Collection<Route> routes) {
-        StringBuilder s = new StringBuilder();
-        for (Route r : routes) s.append(r.id).append(',').append(r.targetHost).append(',').append(r.targetPort).append(',').append(r.channels).append(';');
-        return Integer.toHexString(s.toString().hashCode());
     }
 
     static List<String> localIps() throws SocketException {
@@ -281,6 +300,12 @@ public class Server {
         }
         if (ips.isEmpty()) ips.add("127.0.0.1");
         return ips;
+    }
+
+    static void sendLine(Socket s, String line) throws IOException {
+        OutputStream out = s.getOutputStream();
+        out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+        out.flush();
     }
 
     static String pick(String[] args, int i, String env, String def) {
@@ -301,6 +326,20 @@ public class Server {
 
     static synchronized void log(String msg) {
         System.out.println(msg);
+    }
+
+    static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ignored) {
+        }
+    }
+
+    static void closeAll() {
+        synchronized (ACTIVE) {
+            for (Socket s : ACTIVE) close(s);
+            ACTIVE.clear();
+        }
     }
 
     static void close(Closeable c) {
