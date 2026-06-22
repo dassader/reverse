@@ -54,12 +54,14 @@ public class AdminController {
                 .ok{color:#176b37;background:#ddf7e7}.bad{color:#9a1b1b;background:#fee2e2}.pill{display:inline-block;border-radius:999px;padding:3px 9px;font-size:12px}
                 .route,.add{display:grid;grid-template-columns:1.2fr 1fr .8fr 1.4fr .8fr 1fr 1.2fr .7fr auto auto;gap:8px;align-items:end;padding:10px;margin-bottom:8px}
                 .head{display:grid;grid-template-columns:1.2fr 1fr .8fr 1.4fr .8fr 1fr 1.2fr .7fr auto auto;gap:8px;color:#5d6675;font-size:12px;text-transform:uppercase;padding:0 10px 6px}
-                input,select{width:100%;box-sizing:border-box;border:1px solid #cfd6df;border-radius:6px;padding:8px;background:white;color:#171a1f}
+                input,select{width:100%%;box-sizing:border-box;border:1px solid #cfd6df;border-radius:6px;padding:8px;background:white;color:#171a1f}
                 input[type=checkbox]{width:auto}.check{display:flex;gap:6px;align-items:center;height:36px}
                 button{border:1px solid #bbc4d0;background:#ffffff;border-radius:6px;padding:8px 12px;cursor:pointer;white-space:nowrap}
                 button.primary{background:#174ea6;color:white;border-color:#174ea6}.danger{color:#9a1b1b}.muted{color:#5d6675}.error{background:#fee2e2;color:#9a1b1b;border:1px solid #fecaca;border-radius:8px;padding:10px;margin-bottom:12px}
                 .bar{display:flex;justify-content:space-between;gap:12px;align-items:center}.actions{display:flex;gap:8px;align-items:center}
                 .stat{font-size:12px;color:#5d6675;margin-top:4px}.small{font-size:12px}
+                .clientbox{display:flex;gap:10px;align-items:center;background:white;border:1px solid #dde2e8;border-radius:8px;padding:10px;margin-bottom:16px}
+                code{display:block;white-space:pre-wrap;word-break:break-all;color:#111827;flex:1}
                 @media(max-width:980px){.grid{grid-template-columns:1fr 1fr}.head{display:none}.route,.add{grid-template-columns:1fr 1fr}.wide{grid-column:1/-1}}
               </style>
             </head>
@@ -69,6 +71,7 @@ public class AdminController {
                 <h1>Reverse Server</h1>
                 <div class="actions">
                   <form method="post" action="/routes/reload"><button>Reload</button></form>
+                  <button id="copy-client" type="button" onclick="copyClient()">Copy Client</button>
                   <a class="small muted" href="/api/state">/api/state</a>
                 </div>
               </div>
@@ -79,6 +82,7 @@ public class AdminController {
                 <div class="card"><div class="label">Streams</div><div class="value">%d active / %d total</div><div class="muted">%d errors</div></div>
                 <div class="card"><div class="label">Traffic</div><div class="value">%s / %s</div><div class="muted">up / down</div></div>
               </section>
+              <section class="clientbox"><code id="client-command"></code><button type="button" onclick="copyClient()">Copy</button></section>
               <h2>Routes</h2>
               <div class="head"><div>ID</div><div>Bind</div><div>Public</div><div>Target host</div><div>Target</div><div>Mode</div><div>TLS host</div><div>Enabled</div><div></div><div></div></div>
               %s
@@ -86,6 +90,27 @@ public class AdminController {
               %s
               <p class="muted small">Config: %s | Control: 0.0.0.0:%d | Admin: %s:%d</p>
             </main>
+            <script>
+              function clientCommand() {
+                var host = window.location.hostname || "server-ip";
+                return "javac Client/Client.java\\njava -cp Client Client " + host + " %d";
+              }
+              async function copyClient() {
+                var text = clientCommand();
+                try {
+                  await navigator.clipboard.writeText(text);
+                  var button = document.getElementById("copy-client");
+                  if (button) {
+                    var old = button.textContent;
+                    button.textContent = "Copied";
+                    setTimeout(function(){ button.textContent = old; }, 1200);
+                  }
+                } catch (e) {
+                  window.prompt("Client command", text);
+                }
+              }
+              document.getElementById("client-command").textContent = clientCommand();
+            </script>
             </body>
             </html>
             """.formatted(
@@ -106,7 +131,8 @@ public class AdminController {
             html(store.file().toString()),
             settings.controlPort(),
             html(settings.adminBind()),
-            settings.adminPort()
+            settings.adminPort(),
+            settings.controlPort()
         );
     }
 
