@@ -24,16 +24,16 @@ public class Client {
         String serverHost = pick(args, 0, "SERVER_HOST", "127.0.0.1");
         int controlPort = Integer.parseInt(pick(args, 1, "CONTROL_PORT", "7443"));
 
-        System.out.println("Server: " + serverHost + ":" + controlPort);
+        System.out.println("Connecting...");
         List<Route> routes = config(serverHost, controlPort);
         for (Route r : routes) {
-            System.out.println("Route " + r.id + " -> " + r.host + ":" + r.port + " x" + r.channels);
             for (int i = 1; i <= r.channels; i++) {
                 int n = i;
                 Thread t = new Thread(() -> loop(serverHost, controlPort, r, n), "tunnel-" + r.id + "-" + n);
                 t.start();
             }
         }
+        System.out.println("Connected!");
         Thread.currentThread().join();
     }
 
@@ -60,16 +60,12 @@ public class Client {
                 tunnel.setTcpNoDelay(true);
                 PrintWriter out = new PrintWriter(new OutputStreamWriter(tunnel.getOutputStream(), StandardCharsets.UTF_8), true);
                 out.println("TUNNEL " + route.id);
-                log("[C] " + route.id + "#" + n + " ready");
                 if (tunnel.getInputStream().read() != 1) throw new IOException("server closed tunnel");
-                log("[C] " + route.id + "#" + n + " active");
                 try (Socket target = new Socket(route.host, route.port)) {
                     target.setTcpNoDelay(true);
                     pipeBoth(tunnel, target);
-                    log("[C] " + route.id + "#" + n + " done");
                 }
             } catch (Exception e) {
-                log("[C] " + route.id + "#" + n + " retry");
                 sleep(1000);
             }
         }
@@ -103,10 +99,6 @@ public class Client {
 
     static String pick(String[] args, int i, String env, String def) {
         return args.length > i ? args[i] : System.getenv().getOrDefault(env, def);
-    }
-
-    static synchronized void log(String msg) {
-        System.out.println(msg);
     }
 
     static void sleep(long ms) {
