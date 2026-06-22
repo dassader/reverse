@@ -1,10 +1,12 @@
 import java.io.*;
 import java.net.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class Client {
     static final int BUF = 64 * 1024;
     static final ExecutorService IO = Executors.newCachedThreadPool();
+    static final AtomicLong STREAM_IDS = new AtomicLong();
 
     public static void main(String[] args) throws Exception {
         String serverHost = pick(args, 0, "SERVER_HOST", "127.0.0.1");
@@ -18,38 +20,48 @@ public class Client {
         System.out.println("Channels:                          " + channels);
         for (int i = 0; i < channels; i++) {
             int id = i + 1;
-            Thread t = new Thread(() -> loop(serverHost, tunnelPort, targetHost, targetPort), "tunnel-" + id);
+            Thread t = new Thread(() -> loop(id, serverHost, tunnelPort, targetHost, targetPort), "tunnel-" + id);
             t.start();
         }
         Thread.currentThread().join();
     }
 
-    static void loop(String serverHost, int tunnelPort, String targetHost, int targetPort) {
+    static void loop(int channelId, String serverHost, int tunnelPort, String targetHost, int targetPort) {
         while (true) {
             try (Socket tunnel = new Socket(serverHost, tunnelPort)) {
                 tunnel.setTcpNoDelay(true);
                 tunnel.setKeepAlive(true);
+                log("[C] tunnel#" + channelId + " ready");
                 if (tunnel.getInputStream().read() != 1) throw new IOException("server closed tunnel");
+                long streamId = STREAM_IDS.incrementAndGet();
+                log("[C] stream#" + streamId + " -> " + targetHost + ":" + targetPort);
                 try (Socket local = new Socket(targetHost, targetPort)) {
                     local.setTcpNoDelay(true);
-                    pipeBoth(tunnel, local, targetHost + ":" + targetPort);
+                    pipeBoth(tunnel, local, targetHost + ":" + targetPort, streamId);
+                    log("[C] stream#" + streamId + " done");
                 }
             } catch (Exception e) {
+                log("[C] tunnel#" + channelId + " retry");
                 sleep(1000);
             }
         }
     }
 
-    static void pipeBoth(Socket a, Socket b, String host) throws InterruptedException {
-        CountDownLatch done = new CountDownLatch(1);
-        IO.execute(() -> pipeHttpRequest(a, b, done, host));
-        IO.execute(() -> pipe(b, a, done));
-        done.await();
+    static long[] pipeBoth(Socket a, Socket b, String host, long streamId) throws InterruptedException {
+        AtomicLong aToB = new AtomicLong();
+        AtomicLong bToA = new AtomicLong();
+        CountDownLatch firstDone = new CountDownLatch(1);
+        CountDownLatch allDone = new CountDownLatch(2);
+        IO.execute(() -> pipeHttpRequest(a, b, firstDone, allDone, aToB, host, streamId));
+        IO.execute(() -> pipe(b, a, firstDone, allDone, bToA));
+        firstDone.await();
         close(a);
         close(b);
+        allDone.await(2, TimeUnit.SECONDS);
+        return new long[] {aToB.get(), bToA.get()};
     }
 
-    static void pipe(Socket from, Socket to, CountDownLatch done) {
+    static void pipe(Socket from, Socket to, CountDownLatch firstDone, CountDownLatch allDone, AtomicLong bytes) {
         try {
             byte[] buf = new byte[BUF];
             InputStream in = from.getInputStream();
@@ -57,16 +69,18 @@ public class Client {
             for (int n; (n = in.read(buf)) >= 0; ) {
                 out.write(buf, 0, n);
                 out.flush();
+                bytes.addAndGet(n);
             }
         } catch (IOException ignored) {
         } finally {
             close(from);
             close(to);
-            done.countDown();
+            firstDone.countDown();
+            allDone.countDown();
         }
     }
 
-    static void pipeHttpRequest(Socket from, Socket to, CountDownLatch done, String host) {
+    static void pipeHttpRequest(Socket from, Socket to, CountDownLatch firstDone, CountDownLatch allDone, AtomicLong bytes, String host, long streamId) {
         try {
             InputStream in = from.getInputStream();
             OutputStream out = to.getOutputStream();
@@ -79,19 +93,23 @@ public class Client {
                 if (n >= 4 && h[n - 4] == '\r' && h[n - 3] == '\n' && h[n - 2] == '\r' && h[n - 1] == '\n') break;
                 if (n > 64 * 1024) break;
             }
+            log("[C] " + requestLine(head.toByteArray()));
             byte[] h = rewriteHost(head.toByteArray(), host);
             out.write(h);
             out.flush();
+            bytes.addAndGet(h.length);
             byte[] buf = new byte[BUF];
             for (int n; (n = in.read(buf)) >= 0; ) {
                 out.write(buf, 0, n);
                 out.flush();
+                bytes.addAndGet(n);
             }
         } catch (IOException ignored) {
         } finally {
             close(from);
             close(to);
-            done.countDown();
+            firstDone.countDown();
+            allDone.countDown();
         }
     }
 
@@ -114,8 +132,19 @@ public class Client {
         return String.join("\r\n", lines).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     }
 
+    static String requestLine(byte[] raw) {
+        if (raw.length == 0) return "empty request";
+        String s = new String(raw, java.nio.charset.StandardCharsets.ISO_8859_1);
+        int end = s.indexOf("\r\n");
+        return end >= 0 ? s.substring(0, end) : s;
+    }
+
     static String pick(String[] args, int i, String env, String def) {
         return args.length > i ? args[i] : System.getenv().getOrDefault(env, def);
+    }
+
+    static synchronized void log(String message) {
+        System.out.println(message);
     }
 
     static void sleep(long ms) {
