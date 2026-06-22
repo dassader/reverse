@@ -9,6 +9,7 @@ import reverse.server.config.*;
 import reverse.server.proxy.ProxyRuntime;
 import reverse.server.stats.RouteStats;
 import reverse.server.stats.StatsService;
+import reverse.server.util.Net;
 
 import java.io.IOException;
 import java.net.URI;
@@ -33,6 +34,7 @@ public class AdminController {
     @GetMapping(value = "/", produces = MediaType.TEXT_HTML_VALUE)
     public String index(@RequestParam(value = "error", required = false) String error) {
         long now = System.currentTimeMillis();
+        String clientIp = serverIp();
         StringBuilder routes = new StringBuilder();
         for (RouteConfig route : store.routes()) routes.append(routeForm(route, now));
         return """
@@ -71,7 +73,7 @@ public class AdminController {
                 <h1>Reverse Server</h1>
                 <div class="actions">
                   <form method="post" action="/routes/reload"><button>Reload</button></form>
-                  <button id="copy-client" type="button" onclick="copyClient()">Copy Client</button>
+                  <button id="copy-client-source" type="button" onclick="copyClientSource()">Copy Client.java</button>
                   <a class="small muted" href="/api/state">/api/state</a>
                 </div>
               </div>
@@ -82,7 +84,7 @@ public class AdminController {
                 <div class="card"><div class="label">Streams</div><div class="value">%d active / %d total</div><div class="muted">%d errors</div></div>
                 <div class="card"><div class="label">Traffic</div><div class="value">%s / %s</div><div class="muted">up / down</div></div>
               </section>
-              <section class="clientbox"><code id="client-command"></code><button type="button" onclick="copyClient()">Copy</button></section>
+              <section class="clientbox"><code id="client-command">Client.java: %s:%d</code><button id="copy-client-command" type="button" onclick="copyClientCommand()">Copy command</button><button type="button" onclick="copyClientSource()">Copy Client.java</button><a class="small muted" href="/client/Client.java">open source</a></section>
               <h2>Routes</h2>
               <div class="head"><div>ID</div><div>Bind</div><div>Public</div><div>Target host</div><div>Target</div><div>Mode</div><div>TLS host</div><div>Enabled</div><div></div><div></div></div>
               %s
@@ -92,24 +94,31 @@ public class AdminController {
             </main>
             <script>
               function clientCommand() {
-                var host = window.location.hostname || "server-ip";
-                return "javac Client/Client.java\\njava -cp Client Client " + host + " %d";
+                return "javac Client.java\\njava Client";
               }
-              async function copyClient() {
-                var text = clientCommand();
+              async function copyText(text, buttonId) {
                 try {
                   await navigator.clipboard.writeText(text);
-                  var button = document.getElementById("copy-client");
+                  var button = document.getElementById(buttonId);
                   if (button) {
                     var old = button.textContent;
                     button.textContent = "Copied";
                     setTimeout(function(){ button.textContent = old; }, 1200);
                   }
                 } catch (e) {
-                  window.prompt("Client command", text);
+                  window.prompt("Copy", text);
                 }
               }
-              document.getElementById("client-command").textContent = clientCommand();
+              async function copyClientCommand() {
+                var text = clientCommand();
+                await copyText(text, "copy-client-command");
+              }
+              async function copyClientSource() {
+                var response = await fetch("/client/Client.java", {cache: "no-store"});
+                var text = await response.text();
+                await copyText(text, "copy-client-source");
+              }
+              document.getElementById("client-command").textContent = "Configured Client.java -> %s:%d\\n" + clientCommand();
             </script>
             </body>
             </html>
@@ -126,14 +135,160 @@ public class AdminController {
             stats.errors(),
             bytes(stats.bytesUp()),
             bytes(stats.bytesDown()),
+            html(clientIp),
+            settings.controlPort(),
             routes,
             addForm(),
             html(store.file().toString()),
             settings.controlPort(),
             html(settings.adminBind()),
             settings.adminPort(),
+            html(clientIp),
             settings.controlPort()
         );
+    }
+
+    @GetMapping(value = "/client/Client.java", produces = MediaType.TEXT_PLAIN_VALUE)
+    public ResponseEntity<String> clientJava() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"Client.java\"");
+        return new ResponseEntity<>(clientSource(serverIp(), settings.controlPort()), headers, HttpStatus.OK);
+    }
+
+    private String clientSource(String serverHost, int serverPort) {
+        return """
+            import java.io.*;
+            import java.net.*;
+            import java.nio.charset.StandardCharsets;
+            import java.util.*;
+            import java.util.concurrent.*;
+
+            public class Client {
+                static final int BUF = 64 * 1024;
+                static final ExecutorService IO = Executors.newCachedThreadPool();
+                static final List<Socket> ACTIVE = Collections.synchronizedList(new ArrayList<>());
+
+                public static void main(String[] args) {
+                    String serverHost = pick(args, 0, "SERVER_HOST", "%s");
+                    int serverPort = Integer.parseInt(pick(args, 1, "SERVER_PORT", "%d"));
+
+                    while (true) {
+                        System.out.println("Connecting...");
+                        try (Socket control = new Socket(serverHost, serverPort)) {
+                            control.setTcpNoDelay(true);
+                            System.out.println("Connected!");
+                            commands(serverHost, serverPort, control);
+                        } catch (Exception ignored) {
+                        }
+                        closeAll();
+                        sleep(1000);
+                    }
+                }
+
+                static void commands(String serverHost, int serverPort, Socket control) throws IOException {
+                    BufferedReader in = new BufferedReader(new InputStreamReader(control.getInputStream(), StandardCharsets.UTF_8));
+                    BufferedWriter out = new BufferedWriter(new OutputStreamWriter(control.getOutputStream(), StandardCharsets.UTF_8));
+                    for (String line; (line = in.readLine()) != null; ) {
+                        if ("P".equals(line)) {
+                            out.write("P\\n");
+                            out.flush();
+                        } else if (line.startsWith("S ")) {
+                            socket(serverHost, serverPort, line);
+                        }
+                    }
+                }
+
+                static void socket(String serverHost, int serverPort, String command) {
+                    Socket tunnel = null;
+                    Socket target = null;
+                    try {
+                        String[] p = command.split(" ", 3);
+                        if (p.length != 3) throw new IOException("bad socket command");
+
+                        target = new Socket(p[1], Integer.parseInt(p[2]));
+                        target.setTcpNoDelay(true);
+                        ACTIVE.add(target);
+
+                        tunnel = new Socket(serverHost, serverPort);
+                        tunnel.setTcpNoDelay(true);
+                        ACTIVE.add(tunnel);
+
+                        Socket a = tunnel, b = target;
+                        IO.execute(() -> {
+                            try {
+                                pipeBoth(a, b);
+                            } catch (InterruptedException ignored) {
+                            } finally {
+                                ACTIVE.remove(a);
+                                ACTIVE.remove(b);
+                            }
+                        });
+                    } catch (Exception ignored) {
+                        close(tunnel);
+                        close(target);
+                    }
+                }
+
+                static void pipeBoth(Socket a, Socket b) throws InterruptedException {
+                    CountDownLatch done = new CountDownLatch(1);
+                    IO.execute(() -> pipe(a, b, done));
+                    IO.execute(() -> pipe(b, a, done));
+                    done.await();
+                    close(a);
+                    close(b);
+                }
+
+                static void pipe(Socket from, Socket to, CountDownLatch done) {
+                    try {
+                        byte[] buf = new byte[BUF];
+                        InputStream in = from.getInputStream();
+                        OutputStream out = to.getOutputStream();
+                        for (int n; (n = in.read(buf)) >= 0; ) {
+                            out.write(buf, 0, n);
+                            out.flush();
+                        }
+                    } catch (IOException ignored) {
+                    } finally {
+                        close(from);
+                        close(to);
+                        done.countDown();
+                    }
+                }
+
+                static String pick(String[] args, int i, String env, String def) {
+                    return args.length > i ? args[i] : System.getenv().getOrDefault(env, def);
+                }
+
+                static void sleep(long ms) {
+                    try {
+                        Thread.sleep(ms);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+
+                static void closeAll() {
+                    synchronized (ACTIVE) {
+                        for (Socket s : ACTIVE) close(s);
+                        ACTIVE.clear();
+                    }
+                }
+
+                static void close(Closeable c) {
+                    try {
+                        if (c != null) c.close();
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+            """.formatted(javaString(serverHost), serverPort);
+    }
+
+    private String serverIp() {
+        return Net.localIps().get(0);
+    }
+
+    private String javaString(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     @GetMapping("/api/state")

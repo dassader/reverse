@@ -31,11 +31,17 @@ Open the web UI:
 http://server-ip:8080/
 ```
 
-The UI has a `Copy Client` button. It copies a ready command using the host from the opened page and the configured control port:
+The UI has a `Copy Client.java` button. It copies a ready client source file with the server LAN IP and control port already embedded:
 
 ```bash
-javac Client/Client.java
-java -cp Client Client server-ip 7443
+javac Client.java
+java Client
+```
+
+The same source is available at:
+
+```text
+http://server-ip:8080/client/Client.java
 ```
 
 The server creates `server-config.json` on first start with a default IntelliJ MCP route:
