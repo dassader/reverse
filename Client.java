@@ -33,28 +33,27 @@ public class Client {
             if ("P".equals(line)) {
                 out.write("P\n");
                 out.flush();
-            } else if ("S".equals(line)) {
-                socket(serverHost, serverPort);
+            } else if (line.startsWith("S ")) {
+                socket(serverHost, serverPort, line);
             }
         }
     }
 
-    static void socket(String serverHost, int serverPort) {
+    static void socket(String serverHost, int serverPort, String command) {
         Socket tunnel = null;
         Socket target = null;
         try {
-            tunnel = new Socket(serverHost, serverPort);
-            tunnel.setTcpNoDelay(true);
-            ACTIVE.add(tunnel);
-
-            String line = readLine(tunnel.getInputStream());
-            if (line == null || !line.startsWith("S ")) throw new IOException("bad socket command");
-            String[] p = line.split(" ", 3);
+            String[] p = command.split(" ", 3);
             if (p.length != 3) throw new IOException("bad socket command");
 
             target = new Socket(p[1], Integer.parseInt(p[2]));
             target.setTcpNoDelay(true);
             ACTIVE.add(target);
+
+            tunnel = new Socket(serverHost, serverPort);
+            tunnel.setTcpNoDelay(true);
+            ACTIVE.add(tunnel);
+
             Socket a = tunnel, b = target;
             IO.execute(() -> {
                 try {
@@ -95,18 +94,6 @@ public class Client {
             close(to);
             done.countDown();
         }
-    }
-
-    static String readLine(InputStream in) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int b;
-        while ((b = in.read()) >= 0) {
-            if (b == '\n') break;
-            if (b != '\r') out.write(b);
-            if (out.size() > 1024) throw new IOException("line too long");
-        }
-        if (b < 0 && out.size() == 0) return null;
-        return out.toString(StandardCharsets.UTF_8);
     }
 
     static String pick(String[] args, int i, String env, String def) {

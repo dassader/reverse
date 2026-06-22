@@ -185,10 +185,9 @@ public class Server {
 
     static Socket openTunnel(Control control, Route route) throws Exception {
         synchronized (OPEN_LOCK) {
-            control.send("S");
+            control.send("S " + route.targetHost + " " + route.targetPort);
             Socket tunnel = DATA.poll(30, TimeUnit.SECONDS);
             if (tunnel == null) throw new IOException("no data socket");
-            sendLine(tunnel, "S " + route.targetHost + " " + route.targetPort);
             return tunnel;
         }
     }
@@ -300,12 +299,6 @@ public class Server {
         }
         if (ips.isEmpty()) ips.add("127.0.0.1");
         return ips;
-    }
-
-    static void sendLine(Socket s, String line) throws IOException {
-        OutputStream out = s.getOutputStream();
-        out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
-        out.flush();
     }
 
     static String pick(String[] args, int i, String env, String def) {
