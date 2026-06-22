@@ -31,7 +31,7 @@ Open the web UI:
 http://server-ip:8080/
 ```
 
-The UI has a `Copy Client.java` button. It copies a ready client source file with the server LAN IP and control port already embedded:
+The UI has a server IP dropdown and a `Copy Client.java` button. Pick the LAN IP that the client computer can reach, then copy the ready client source file with that IP and control port already embedded:
 
 ```bash
 javac Client.java
@@ -42,6 +42,12 @@ The same source is available at:
 
 ```text
 http://server-ip:8080/client/Client.java
+```
+
+You can also request a specific detected server IP directly:
+
+```text
+http://server-ip:8080/client/Client.java?host=192.168.50.11
 ```
 
 The server creates `server-config.json` on first start with a default IntelliJ MCP route:

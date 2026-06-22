@@ -34,7 +34,8 @@ public class AdminController {
     @GetMapping(value = "/", produces = MediaType.TEXT_HTML_VALUE)
     public String index(@RequestParam(value = "error", required = false) String error) {
         long now = System.currentTimeMillis();
-        String clientIp = serverIp();
+        List<String> clientIps = Net.localIps();
+        String clientIp = clientIps.get(0);
         StringBuilder routes = new StringBuilder();
         for (RouteConfig route : store.routes()) routes.append(routeForm(route, now));
         return """
@@ -84,7 +85,7 @@ public class AdminController {
                 <div class="card"><div class="label">Streams</div><div class="value">%d active / %d total</div><div class="muted">%d errors</div></div>
                 <div class="card"><div class="label">Traffic</div><div class="value">%s / %s</div><div class="muted">up / down</div></div>
               </section>
-              <section class="clientbox"><code id="client-command">Client.java: %s:%d</code><button id="copy-client-command" type="button" onclick="copyClientCommand()">Copy command</button><button type="button" onclick="copyClientSource()">Copy Client.java</button><a class="small muted" href="/client/Client.java">open source</a></section>
+              <section class="clientbox"><label class="small muted" for="client-ip">Server IP</label><select id="client-ip" onchange="updateClientBox()">%s</select><code id="client-command">Client.java: %s:%d</code><button id="copy-client-command" type="button" onclick="copyClientCommand()">Copy command</button><button id="copy-client-source-inline" type="button" onclick="copyClientSource()">Copy Client.java</button><a id="client-source-link" class="small muted" href="/client/Client.java">open source</a></section>
               <h2>Routes</h2>
               <div class="head"><div>ID</div><div>Bind</div><div>Public</div><div>Target host</div><div>Target</div><div>Mode</div><div>TLS host</div><div>Enabled</div><div></div><div></div></div>
               %s
@@ -95,6 +96,30 @@ public class AdminController {
             <script>
               function clientCommand() {
                 return "javac Client.java\\njava Client";
+              }
+              function selectedClientIp() {
+                var select = document.getElementById("client-ip");
+                return select ? select.value : "%s";
+              }
+              function clientSourceUrl() {
+                return "/client/Client.java?host=" + encodeURIComponent(selectedClientIp());
+              }
+              function updateClientBox() {
+                var ip = selectedClientIp();
+                try { localStorage.setItem("clientIp", ip); } catch (e) {}
+                document.getElementById("client-command").textContent = "Configured Client.java -> " + ip + ":%d\\n" + clientCommand();
+                document.getElementById("client-source-link").href = clientSourceUrl();
+              }
+              function restoreClientIp() {
+                var select = document.getElementById("client-ip");
+                if (select) {
+                  var saved = null;
+                  try { saved = localStorage.getItem("clientIp"); } catch (e) {}
+                  for (var i = 0; saved && i < select.options.length; i++) {
+                    if (select.options[i].value === saved) select.value = saved;
+                  }
+                }
+                updateClientBox();
               }
               async function copyText(text, buttonId) {
                 try {
@@ -114,11 +139,11 @@ public class AdminController {
                 await copyText(text, "copy-client-command");
               }
               async function copyClientSource() {
-                var response = await fetch("/client/Client.java", {cache: "no-store"});
+                var response = await fetch(clientSourceUrl(), {cache: "no-store"});
                 var text = await response.text();
                 await copyText(text, "copy-client-source");
               }
-              document.getElementById("client-command").textContent = "Configured Client.java -> %s:%d\\n" + clientCommand();
+              restoreClientIp();
             </script>
             </body>
             </html>
@@ -135,6 +160,7 @@ public class AdminController {
             stats.errors(),
             bytes(stats.bytesUp()),
             bytes(stats.bytesDown()),
+            ipOptions(clientIps),
             html(clientIp),
             settings.controlPort(),
             routes,
@@ -149,10 +175,10 @@ public class AdminController {
     }
 
     @GetMapping(value = "/client/Client.java", produces = MediaType.TEXT_PLAIN_VALUE)
-    public ResponseEntity<String> clientJava() {
+    public ResponseEntity<String> clientJava(@RequestParam(value = "host", required = false) String host) {
         HttpHeaders headers = new HttpHeaders();
         headers.set(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"Client.java\"");
-        return new ResponseEntity<>(clientSource(serverIp(), settings.controlPort()), headers, HttpStatus.OK);
+        return new ResponseEntity<>(clientSource(clientHost(host), settings.controlPort()), headers, HttpStatus.OK);
     }
 
     private String clientSource(String serverHost, int serverPort) {
@@ -283,8 +309,16 @@ public class AdminController {
             """.formatted(javaString(serverHost), serverPort);
     }
 
-    private String serverIp() {
-        return Net.localIps().get(0);
+    private String clientHost(String host) {
+        List<String> ips = Net.localIps();
+        if (host != null && ips.contains(host)) return host;
+        return ips.get(0);
+    }
+
+    private String ipOptions(List<String> ips) {
+        StringBuilder out = new StringBuilder();
+        for (String ip : ips) out.append("<option value=\"").append(html(ip)).append("\">").append(html(ip)).append("</option>");
+        return out.toString();
     }
 
     private String javaString(String value) {
